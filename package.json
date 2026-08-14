@@ -1,0 +1,10 @@
+{
+  "name": "college-erp-root",
+  "version": "1.0.0",
+  "description": "Root scripts to run College ERP",
+  "scripts": {
+    "start-server": "npm run start --prefix server",
+    "start-client": "npm run start --prefix client",
+    "start": "npm run start-server & npm run start-client"
+  }
+}

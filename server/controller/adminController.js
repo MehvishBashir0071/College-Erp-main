@@ -30,7 +30,7 @@ export const adminLogin = async (req, res) => {
         email: existingAdmin.email,
         id: existingAdmin._id,
       },
-      "sEcReT",
+      process.env.JWT_SECRET,
       { expiresIn: "1h" }
     );
 

@@ -30,7 +30,7 @@ export const studentLogin = async (req, res) => {
         email: existingStudent.email,
         id: existingStudent._id,
       },
-      "sEcReT",
+      process.env.JWT_SECRET,
       { expiresIn: "1h" }
     );
 
