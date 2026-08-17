@@ -1,0 +1,118 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Department {
+  id             Int      @id @default(autoincrement())
+  department     String   @unique
+  departmentCode String   @unique
+}
+
+model Admin {
+  id              Int      @id @default(autoincrement())
+  name            String
+  email           String   @unique
+  password        String
+  username        String   @unique
+  department      String?
+  dob             String?
+  joiningYear     String?
+  avatar          String?
+  contactNumber   BigInt?
+  passwordUpdated Boolean  @default(false)
+}
+
+model Faculty {
+  id              Int      @id @default(autoincrement())
+  name            String
+  email           String   @unique
+  avatar          String?
+  password        String
+  username        String   @unique
+  gender          String?
+  designation     String
+  department      String
+  contactNumber   BigInt?
+  dob             String
+  joiningYear     Int
+  passwordUpdated Boolean  @default(false)
+}
+
+model Student {
+  id                  Int          @id @default(autoincrement())
+  name                String
+  email               String       @unique
+  avatar              String?
+  password            String
+  year                Int
+  username            String       @unique
+  gender              String?
+  fatherName          String?
+  motherName          String?
+  department          String
+  section             String
+  batch               String?
+  contactNumber       BigInt?
+  fatherContactNumber BigInt?
+  dob                 String
+  passwordUpdated     Boolean      @default(false)
+  subjects            Subject[]
+  attendance          Attendance[]
+  marks               Marks[]
+}
+
+model Subject {
+  id            Int          @id @default(autoincrement())
+  subjectName   String
+  subjectCode   String       @unique
+  department    String
+  totalLectures Int          @default(10)
+  year          String
+  students      Student[]
+  attendance    Attendance[]
+}
+
+model Attendance {
+  id                     Int     @id @default(autoincrement())
+  studentId              Int
+  student                Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subjectId              Int
+  subject                Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  totalLecturesByFaculty Int     @default(0)
+  lectureAttended        Int     @default(0)
+}
+
+model Test {
+  id          Int     @id @default(autoincrement())
+  test        String
+  subjectCode String
+  department  String
+  totalMarks  Int     @default(10)
+  year        String
+  section     String
+  date        String
+  marks       Marks[]
+}
+
+model Marks {
+  id        Int     @id @default(autoincrement())
+  testId    Int
+  test      Test    @relation(fields: [testId], references: [id], onDelete: Cascade)
+  studentId Int
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  marks     Int     @default(-1)
+}
+
+model Notice {
+  id        Int    @id @default(autoincrement())
+  topic     String
+  date      String
+  content   String
+  from      String
+  noticeFor String
+}

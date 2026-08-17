@@ -1,17 +1,26 @@
-import Admin from "../models/admin.js";
-import Department from "../models/department.js";
-import Faculty from "../models/faculty.js";
-import Student from "../models/student.js";
-import Subject from "../models/subject.js";
-import Notice from "../models/notice.js";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
+import prisma from "../config/prisma.js";
+import { uploadImage } from "../services/s3Service.js";
+import { publishEvent } from "../services/kafka.js";
+
+// Helper to serialize BigInt fields to String to prevent JSON parse crashes in Express responses
+const serialize = (data) => {
+  return JSON.parse(
+    JSON.stringify(data, (key, value) =>
+      typeof value === "bigint" ? value.toString() : value
+    )
+  );
+};
 
 export const adminLogin = async (req, res) => {
   const { username, password } = req.body;
-  const errors = { usernameError: String, passwordError: String };
+  const errors = { usernameError: "", passwordError: "" };
   try {
-    const existingAdmin = await Admin.findOne({ username });
+    const existingAdmin = await prisma.admin.findUnique({
+      where: { username }
+    });
+    
     if (!existingAdmin) {
       errors.usernameError = "Admin doesn't exist.";
       return res.status(404).json(errors);
@@ -28,94 +37,91 @@ export const adminLogin = async (req, res) => {
     const token = jwt.sign(
       {
         email: existingAdmin.email,
-        id: existingAdmin._id,
+        id: existingAdmin.id,
       },
       process.env.JWT_SECRET,
       { expiresIn: "1h" }
     );
 
-    res.status(200).json({ result: existingAdmin, token: token });
+    res.status(200).json({ result: serialize(existingAdmin), token });
   } catch (error) {
     console.log(error);
+    res.status(500).json({ message: "Something went wrong" });
   }
 };
 
 export const updatedPassword = async (req, res) => {
   try {
     const { newPassword, confirmPassword, email } = req.body;
-    const errors = { mismatchError: String };
+    const errors = { mismatchError: "" };
     if (newPassword !== confirmPassword) {
-      errors.mismatchError =
-        "Your password and confirmation password do not match";
+      errors.mismatchError = "Your password and confirmation password do not match";
       return res.status(400).json(errors);
     }
 
-    const admin = await Admin.findOne({ email });
-    let hashedPassword;
-    hashedPassword = await bcrypt.hash(newPassword, 10);
-    admin.password = hashedPassword;
-    await admin.save();
-    if (admin.passwordUpdated === false) {
-      admin.passwordUpdated = true;
-      await admin.save();
+    const admin = await prisma.admin.findUnique({ where: { email } });
+    if (!admin) {
+      return res.status(404).json({ message: "Admin not found" });
     }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    const updatedAdmin = await prisma.admin.update({
+      where: { email },
+      data: {
+        password: hashedPassword,
+        passwordUpdated: true,
+      },
+    });
 
     res.status(200).json({
       success: true,
       message: "Password updated successfully",
-      response: admin,
+      response: serialize(updatedAdmin),
     });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
+
 export const updateAdmin = async (req, res) => {
   try {
     const { name, dob, department, contactNumber, avatar, email } = req.body;
-    const updatedAdmin = await Admin.findOne({ email });
-    if (name) {
-      updatedAdmin.name = name;
-      await updatedAdmin.save();
-    }
-    if (dob) {
-      updatedAdmin.dob = dob;
-      await updatedAdmin.save();
-    }
-    if (department) {
-      updatedAdmin.department = department;
-      await updatedAdmin.save();
-    }
-    if (contactNumber) {
-      updatedAdmin.contactNumber = contactNumber;
-      await updatedAdmin.save();
-    }
-    if (avatar) {
-      updatedAdmin.avatar = avatar;
-      await updatedAdmin.save();
-    }
-    res.status(200).json(updatedAdmin);
+    const avatarUrl = avatar ? await uploadImage(avatar) : undefined;
+
+    const updatedAdmin = await prisma.admin.update({
+      where: { email },
+      data: {
+        name: name || undefined,
+        dob: dob || undefined,
+        department: department || undefined,
+        contactNumber: contactNumber ? BigInt(contactNumber) : undefined,
+        avatar: avatarUrl,
+      },
+    });
+
+    res.status(200).json(serialize(updatedAdmin));
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
 
 export const addAdmin = async (req, res) => {
   try {
-    const { name, dob, department, contactNumber, avatar, email, joiningYear } =
-      req.body;
-    const errors = { emailError: String };
-    const existingAdmin = await Admin.findOne({ email });
+    const { name, dob, department, contactNumber, avatar, email, joiningYear } = req.body;
+    const errors = { emailError: "" };
+    
+    const existingAdmin = await prisma.admin.findUnique({ where: { email } });
     if (existingAdmin) {
       errors.emailError = "Email already exists";
       return res.status(400).json(errors);
     }
-    const existingDepartment = await Department.findOne({ department });
+    
+    const existingDepartment = await prisma.department.findUnique({ where: { department } });
+    if (!existingDepartment) {
+      return res.status(400).json({ message: "Department does not exist" });
+    }
     let departmentHelper = existingDepartment.departmentCode;
-    const admins = await Admin.find({ department });
+    const admins = await prisma.admin.findMany({ where: { department } });
 
     let helper;
     if (admins.length < 10) {
@@ -125,104 +131,124 @@ export const addAdmin = async (req, res) => {
     } else {
       helper = admins.length.toString();
     }
-    var date = new Date();
-    var components = ["ADM", date.getFullYear(), departmentHelper, helper];
-
-    var username = components.join("");
-    let hashedPassword;
+    const date = new Date();
+    const components = ["ADM", date.getFullYear(), departmentHelper, helper];
+    const username = components.join("");
+    
     const newDob = dob.split("-").reverse().join("-");
+    const hashedPassword = await bcrypt.hash(newDob, 10);
+    const passwordUpdated = false;
 
-    hashedPassword = await bcrypt.hash(newDob, 10);
-    var passwordUpdated = false;
-    const newAdmin = await new Admin({
-      name,
-      email,
-      password: hashedPassword,
-      joiningYear,
-      username,
-      department,
-      avatar,
-      contactNumber,
-      dob,
-      passwordUpdated,
+    const avatarUrl = avatar ? await uploadImage(avatar) : null;
+
+    const newAdmin = await prisma.admin.create({
+      data: {
+        name,
+        email,
+        password: hashedPassword,
+        joiningYear: joiningYear ? joiningYear.toString() : null,
+        username,
+        department,
+        avatar: avatarUrl,
+        contactNumber: contactNumber ? BigInt(contactNumber) : null,
+        dob,
+        passwordUpdated,
+      }
     });
-    await newAdmin.save();
+
     return res.status(200).json({
       success: true,
-      message: "Admin registerd successfully",
-      response: newAdmin,
+      message: "Admin registered successfully",
+      response: serialize(newAdmin),
     });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
+
 export const addDummyAdmin = async () => {
   const email = "dummy@gmail.com";
   const password = "123";
   const name = "dummy";
   const username = "ADMDUMMY";
-  let hashedPassword;
-  hashedPassword = await bcrypt.hash(password, 10);
-  var passwordUpdated = true;
+  const hashedPassword = await bcrypt.hash(password, 10);
+  const passwordUpdated = true;
 
-  const dummyAdmin = await Admin.findOne({ email });
+  try {
+    const dummyAdmin = await prisma.admin.findUnique({ where: { email } });
 
-  if (!dummyAdmin) {
-    await Admin.create({
-      name,
-      email,
-      password: hashedPassword,
-      username,
-      passwordUpdated,
-    });
-    console.log("Dummy user added.");
-  } else {
-    console.log("Dummy user already exists.");
+    if (!dummyAdmin) {
+      await prisma.admin.create({
+        data: {
+          name,
+          email,
+          password: hashedPassword,
+          username,
+          passwordUpdated,
+        }
+      });
+      console.log("Dummy user added.");
+    } else {
+      console.log("Dummy user already exists.");
+    }
+  } catch (error) {
+    console.log("Error adding dummy admin:", error.message);
   }
 };
 
 export const createNotice = async (req, res) => {
   try {
     const { from, content, topic, date, noticeFor } = req.body;
-
-    const errors = { noticeError: String };
-    const exisitingNotice = await Notice.findOne({ topic, content, date });
-    if (exisitingNotice) {
+    const errors = { noticeError: "" };
+    
+    const existingNotice = await prisma.notice.findFirst({
+      where: { topic, content, date }
+    });
+    
+    if (existingNotice) {
       errors.noticeError = "Notice already created";
       return res.status(400).json(errors);
     }
-    const newNotice = await new Notice({
-      from,
-      content,
-      topic,
-      noticeFor,
-      date,
+    
+    const newNotice = await prisma.notice.create({
+      data: {
+        from,
+        content,
+        topic,
+        noticeFor,
+        date,
+      }
     });
-    await newNotice.save();
+
+    // Publish a background worker event to alert students about the new notice asynchronously
+    await publishEvent("college-erp-alerts", {
+      type: "NOTICE_CREATED",
+      data: {
+        topic: newNotice.topic,
+        noticeFor: newNotice.noticeFor,
+      },
+    });
+    
     return res.status(200).json({
       success: true,
       message: "Notice created successfully",
       response: newNotice,
     });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
 
 export const addDepartment = async (req, res) => {
   try {
-    const errors = { departmentError: String };
+    const errors = { departmentError: "" };
     const { department } = req.body;
-    const existingDepartment = await Department.findOne({ department });
+    const existingDepartment = await prisma.department.findUnique({ where: { department } });
     if (existingDepartment) {
       errors.departmentError = "Department already added";
       return res.status(400).json(errors);
     }
-    const departments = await Department.find({});
+    const departments = await prisma.department.findMany({});
     let add = departments.length + 1;
     let departmentCode;
     if (add < 9) {
@@ -231,21 +257,20 @@ export const addDepartment = async (req, res) => {
       departmentCode = add.toString();
     }
 
-    const newDepartment = await new Department({
-      department,
-      departmentCode,
+    const newDepartment = await prisma.department.create({
+      data: {
+        department,
+        departmentCode,
+      }
     });
 
-    await newDepartment.save();
     return res.status(200).json({
       success: true,
       message: "Department added successfully",
       response: newDepartment,
     });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
 
@@ -262,16 +287,20 @@ export const addFaculty = async (req, res) => {
       gender,
       designation,
     } = req.body;
-    const errors = { emailError: String };
-    const existingFaculty = await Faculty.findOne({ email });
+    const errors = { emailError: "" };
+    
+    const existingFaculty = await prisma.faculty.findUnique({ where: { email } });
     if (existingFaculty) {
       errors.emailError = "Email already exists";
       return res.status(400).json(errors);
     }
-    const existingDepartment = await Department.findOne({ department });
+    const existingDepartment = await prisma.department.findUnique({ where: { department } });
+    if (!existingDepartment) {
+      return res.status(400).json({ message: "Department does not exist" });
+    }
     let departmentHelper = existingDepartment.departmentCode;
 
-    const faculties = await Faculty.find({ department });
+    const faculties = await prisma.faculty.findMany({ where: { department } });
     let helper;
     if (faculties.length < 10) {
       helper = "00" + faculties.length.toString();
@@ -280,229 +309,211 @@ export const addFaculty = async (req, res) => {
     } else {
       helper = faculties.length.toString();
     }
-    var date = new Date();
-    var components = ["FAC", date.getFullYear(), departmentHelper, helper];
-
-    var username = components.join("");
-    let hashedPassword;
+    const date = new Date();
+    const components = ["FAC", date.getFullYear(), departmentHelper, helper];
+    const username = components.join("");
+    
     const newDob = dob.split("-").reverse().join("-");
+    const hashedPassword = await bcrypt.hash(newDob, 10);
+    const passwordUpdated = false;
 
-    hashedPassword = await bcrypt.hash(newDob, 10);
-    var passwordUpdated = false;
+    const avatarUrl = avatar ? await uploadImage(avatar) : null;
 
-    const newFaculty = await new Faculty({
-      name,
-      email,
-      password: hashedPassword,
-      joiningYear,
-      username,
-      department,
-      avatar,
-      contactNumber,
-      dob,
-      gender,
-      designation,
-      passwordUpdated,
+    const newFaculty = await prisma.faculty.create({
+      data: {
+        name,
+        email,
+        password: hashedPassword,
+        joiningYear: parseInt(joiningYear),
+        username,
+        department,
+        avatar: avatarUrl,
+        contactNumber: contactNumber ? BigInt(contactNumber) : null,
+        dob,
+        gender,
+        designation,
+        passwordUpdated,
+      }
     });
-    await newFaculty.save();
+
     return res.status(200).json({
       success: true,
-      message: "Faculty registerd successfully",
-      response: newFaculty,
+      message: "Faculty registered successfully",
+      response: serialize(newFaculty),
     });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
 
 export const getFaculty = async (req, res) => {
   try {
     const { department } = req.body;
-    const errors = { noFacultyError: String };
-    const faculties = await Faculty.find({ department });
+    const errors = { noFacultyError: "" };
+    const faculties = await prisma.faculty.findMany({ where: { department } });
     if (faculties.length === 0) {
       errors.noFacultyError = "No Faculty Found";
       return res.status(404).json(errors);
     }
-    res.status(200).json({ result: faculties });
+    res.status(200).json({ result: serialize(faculties) });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
+
 export const getNotice = async (req, res) => {
   try {
-    const errors = { noNoticeError: String };
-    const notices = await Notice.find({});
+    const errors = { noNoticeError: "" };
+    const notices = await prisma.notice.findMany({});
     if (notices.length === 0) {
       errors.noNoticeError = "No Notice Found";
       return res.status(404).json(errors);
     }
     res.status(200).json({ result: notices });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
 
 export const addSubject = async (req, res) => {
   try {
-    const { totalLectures, department, subjectCode, subjectName, year } =
-      req.body;
-    const errors = { subjectError: String };
-    const subject = await Subject.findOne({ subjectCode });
+    const { totalLectures, department, subjectCode, subjectName, year } = req.body;
+    const errors = { subjectError: "" };
+    
+    const subject = await prisma.subject.findUnique({ where: { subjectCode } });
     if (subject) {
       errors.subjectError = "Given Subject is already added";
       return res.status(400).json(errors);
     }
 
-    const newSubject = await new Subject({
-      totalLectures,
-      department,
-      subjectCode,
-      subjectName,
-      year,
+    const students = await prisma.student.findMany({
+      where: { department, year: parseInt(year) }
     });
 
-    await newSubject.save();
-    const students = await Student.find({ department, year });
-    if (students.length !== 0) {
-      for (var i = 0; i < students.length; i++) {
-        students[i].subjects.push(newSubject._id);
-        await students[i].save();
+    const newSubject = await prisma.subject.create({
+      data: {
+        totalLectures: parseInt(totalLectures) || 10,
+        department,
+        subjectCode,
+        subjectName,
+        year: year.toString(),
+        students: {
+          connect: students.map(s => ({ id: s.id }))
+        }
       }
-    }
+    });
+
     return res.status(200).json({
       success: true,
       message: "Subject added successfully",
-      response: newSubject,
+      response: serialize(newSubject),
     });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
 
 export const getSubject = async (req, res) => {
   try {
     const { department, year } = req.body;
+    const errors = { noSubjectError: "" };
 
-    if (!req.userId) return res.json({ message: "Unauthenticated" });
-    const errors = { noSubjectError: String };
-
-    const subjects = await Subject.find({ department, year });
+    const subjects = await prisma.subject.findMany({
+      where: { department, year: year.toString() }
+    });
+    
     if (subjects.length === 0) {
       errors.noSubjectError = "No Subject Found";
       return res.status(404).json(errors);
     }
-    res.status(200).json({ result: subjects });
+    res.status(200).json({ result: serialize(subjects) });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
 
 export const getAdmin = async (req, res) => {
   try {
     const { department } = req.body;
+    const errors = { noAdminError: "" };
 
-    const errors = { noAdminError: String };
-
-    const admins = await Admin.find({ department });
+    const admins = await prisma.admin.findMany({ where: { department } });
     if (admins.length === 0) {
-      errors.noAdminError = "No Subject Found";
+      errors.noAdminError = "No Admin Found";
       return res.status(404).json(errors);
     }
-    res.status(200).json({ result: admins });
+    res.status(200).json({ result: serialize(admins) });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
 
+// Optimised to delete multiple records in a single SQL operation instead of loop-queries
 export const deleteAdmin = async (req, res) => {
   try {
-    const admins = req.body;
-    const errors = { noAdminError: String };
-    for (var i = 0; i < admins.length; i++) {
-      var admin = admins[i];
-
-      await Admin.findOneAndDelete({ _id: admin });
-    }
+    const admins = req.body; // Array of IDs
+    await prisma.admin.deleteMany({
+      where: {
+        id: { in: admins.map(id => parseInt(id)) }
+      }
+    });
     res.status(200).json({ message: "Admin Deleted" });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
+
 export const deleteFaculty = async (req, res) => {
   try {
     const faculties = req.body;
-    const errors = { noFacultyError: String };
-    for (var i = 0; i < faculties.length; i++) {
-      var faculty = faculties[i];
-
-      await Faculty.findOneAndDelete({ _id: faculty });
-    }
+    await prisma.faculty.deleteMany({
+      where: {
+        id: { in: faculties.map(id => parseInt(id)) }
+      }
+    });
     res.status(200).json({ message: "Faculty Deleted" });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
+
 export const deleteStudent = async (req, res) => {
   try {
     const students = req.body;
-    const errors = { noStudentError: String };
-    for (var i = 0; i < students.length; i++) {
-      var student = students[i];
-
-      await Student.findOneAndDelete({ _id: student });
-    }
+    await prisma.student.deleteMany({
+      where: {
+        id: { in: students.map(id => parseInt(id)) }
+      }
+    });
     res.status(200).json({ message: "Student Deleted" });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
+
 export const deleteSubject = async (req, res) => {
   try {
     const subjects = req.body;
-    const errors = { noSubjectError: String };
-    for (var i = 0; i < subjects.length; i++) {
-      var subject = subjects[i];
-
-      await Subject.findOneAndDelete({ _id: subject });
-    }
+    await prisma.subject.deleteMany({
+      where: {
+        id: { in: subjects.map(id => parseInt(id)) }
+      }
+    });
     res.status(200).json({ message: "Subject Deleted" });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
 
 export const deleteDepartment = async (req, res) => {
   try {
     const { department } = req.body;
-
-    await Department.findOneAndDelete({ department });
-
+    await prisma.department.deleteMany({
+      where: { department }
+    });
     res.status(200).json({ message: "Department Deleted" });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
 
@@ -524,16 +535,20 @@ export const addStudent = async (req, res) => {
       motherContactNumber,
       year,
     } = req.body;
-    const errors = { emailError: String };
-    const existingStudent = await Student.findOne({ email });
+    const errors = { emailError: "" };
+    
+    const existingStudent = await prisma.student.findUnique({ where: { email } });
     if (existingStudent) {
       errors.emailError = "Email already exists";
       return res.status(400).json(errors);
     }
-    const existingDepartment = await Department.findOne({ department });
+    const existingDepartment = await prisma.department.findUnique({ where: { department } });
+    if (!existingDepartment) {
+      return res.status(400).json({ message: "Department does not exist" });
+    }
     let departmentHelper = existingDepartment.departmentCode;
 
-    const students = await Student.find({ department });
+    const students = await prisma.student.findMany({ where: { department } });
     let helper;
     if (students.length < 10) {
       helper = "00" + students.length.toString();
@@ -542,112 +557,132 @@ export const addStudent = async (req, res) => {
     } else {
       helper = students.length.toString();
     }
-    var date = new Date();
-    var components = ["STU", date.getFullYear(), departmentHelper, helper];
-
-    var username = components.join("");
-    let hashedPassword;
+    const date = new Date();
+    const components = ["STU", date.getFullYear(), departmentHelper, helper];
+    const username = components.join("");
+    
     const newDob = dob.split("-").reverse().join("-");
+    const hashedPassword = await bcrypt.hash(newDob, 10);
+    const passwordUpdated = false;
 
-    hashedPassword = await bcrypt.hash(newDob, 10);
-    var passwordUpdated = false;
-
-    const newStudent = await new Student({
-      name,
-      dob,
-      password: hashedPassword,
-      username,
-      department,
-      contactNumber,
-      avatar,
-      email,
-      section,
-      gender,
-      batch,
-      fatherName,
-      motherName,
-      fatherContactNumber,
-      motherContactNumber,
-      year,
-      passwordUpdated,
+    // Find all subjects matching the student's department and year
+    const subjects = await prisma.subject.findMany({
+      where: { department, year: year.toString() }
     });
-    await newStudent.save();
-    const subjects = await Subject.find({ department, year });
-    if (subjects.length !== 0) {
-      for (var i = 0; i < subjects.length; i++) {
-        newStudent.subjects.push(subjects[i]._id);
+
+    const avatarUrl = avatar ? await uploadImage(avatar) : null;
+
+    const newStudent = await prisma.student.create({
+      data: {
+        name,
+        dob,
+        password: hashedPassword,
+        username,
+        department,
+        contactNumber: contactNumber ? BigInt(contactNumber) : null,
+        avatar: avatarUrl,
+        email,
+        section,
+        gender,
+        batch,
+        fatherName,
+        motherName,
+        fatherContactNumber: fatherContactNumber ? BigInt(fatherContactNumber) : null,
+        motherContactNumber: motherContactNumber ? BigInt(motherContactNumber) : null,
+        year: parseInt(year),
+        passwordUpdated,
+        // Establish clean relational connect with subjects automatically in a single query
+        subjects: {
+          connect: subjects.map(s => ({ id: s.id }))
+        }
       }
-    }
-    await newStudent.save();
+    });
+
+    // Publish a background worker event to send credentials/welcome email asynchronously
+    await publishEvent("college-erp-alerts", {
+      type: "STUDENT_REGISTERED",
+      data: {
+        email: newStudent.email,
+        username: newStudent.username,
+      },
+    });
+
     return res.status(200).json({
       success: true,
-      message: "Student registerd successfully",
-      response: newStudent,
+      message: "Student registered successfully",
+      response: serialize(newStudent),
     });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
 
 export const getStudent = async (req, res) => {
   try {
-    const { department, year, section } = req.body;
-    const errors = { noStudentError: String };
-    const students = await Student.find({ department, year });
+    const { department, year } = req.body;
+    const errors = { noStudentError: "" };
+    
+    const students = await prisma.student.findMany({
+      where: { department, year: parseInt(year) }
+    });
 
     if (students.length === 0) {
       errors.noStudentError = "No Student Found";
       return res.status(404).json(errors);
     }
 
-    res.status(200).json({ result: students });
+    res.status(200).json({ result: serialize(students) });
   } catch (error) {
-    const errors = { backendError: String };
-    errors.backendError = error;
-    res.status(500).json(errors);
+    res.status(500).json({ backendError: error.message });
   }
 };
+
 export const getAllStudent = async (req, res) => {
   try {
-    const students = await Student.find();
-    res.status(200).json(students);
+    const students = await prisma.student.findMany({});
+    res.status(200).json(serialize(students));
   } catch (error) {
     console.log("Backend Error", error);
+    res.status(500).json({ message: error.message });
   }
 };
 
 export const getAllFaculty = async (req, res) => {
   try {
-    const faculties = await Faculty.find();
-    res.status(200).json(faculties);
+    const faculties = await prisma.faculty.findMany({});
+    res.status(200).json(serialize(faculties));
   } catch (error) {
     console.log("Backend Error", error);
+    res.status(500).json({ message: error.message });
   }
 };
 
 export const getAllAdmin = async (req, res) => {
   try {
-    const admins = await Admin.find();
-    res.status(200).json(admins);
+    const admins = await prisma.admin.findMany({});
+    res.status(200).json(serialize(admins));
   } catch (error) {
     console.log("Backend Error", error);
+    res.status(500).json({ message: error.message });
   }
 };
+
 export const getAllDepartment = async (req, res) => {
   try {
-    const departments = await Department.find();
+    const departments = await prisma.department.findMany({});
     res.status(200).json(departments);
   } catch (error) {
     console.log("Backend Error", error);
+    res.status(500).json({ message: error.message });
   }
 };
+
 export const getAllSubject = async (req, res) => {
   try {
-    const subjects = await Subject.find();
-    res.status(200).json(subjects);
+    const subjects = await prisma.subject.findMany({});
+    res.status(200).json(serialize(subjects));
   } catch (error) {
     console.log("Backend Error", error);
+    res.status(500).json({ message: error.message });
   }
 };
